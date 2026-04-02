@@ -3,88 +3,81 @@ import requests
 import json
 import concurrent.futures
 
-# הגדרות עיצוב הממשק
+# הגדרות עמוד
 st.set_page_config(page_title="AI Multi-Hub", layout="wide")
-st.markdown("<h1 style='text-align: center;'>🌐 מנוע ה-AI המאוחד שלי</h1>", unsafe_allow_html=True)
-st.write("---")
+st.title("🌐 מנוע ה-AI המאוחד שלי")
 
-# רשימת המודלים לחיבור (כולל המנועים של Copilot ו-Perplexity)
+# רשימת המודלים - וודא שהשמות נכונים לפי OpenRouter
 MODELS = {
     "Gemini (Google)": "google/gemini-flash-1.5-free",
-    "ChatGPT (OpenAI/Copilot)": "openai/gpt-4o-mini",
+    "ChatGPT (OpenAI)": "openai/gpt-4o-mini",
     "Claude (Anthropic)": "anthropic/claude-3-haiku",
-    "Perplexity (Online Search)": "perplexity/sonar-reasoning"
+    "Perplexity (Search)": "perplexity/sonar-reasoning"
 }
 
-# פונקציה לשליחת בקשה ל-OpenRouter
 def call_ai(name, model_id, prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
-    # המפתח יימשך מה-Secrets של Streamlit Cloud
+    
+    # בדיקה אם המפתח קיים ב-Secrets
+    if "MY_KEY" not in st.secrets:
+        return name, "שגיאה: המפתח MY_KEY לא הוגדר ב-Advanced Settings של Streamlit"
+    
     headers = {
         "Authorization": f"Bearer {st.secrets['MY_KEY']}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost:8501", # דרישה של חלק מהמודלים ב-OpenRouter
     }
+    
     data = {
         "model": model_id,
         "messages": [{"role": "user", "content": prompt}]
     }
+    
     try:
         response = requests.post(url, headers=headers, data=json.dumps(data), timeout=25)
-        res_json = response.json()
-        return name, res_json['choices'][0]['message']['content']
+        
+        if response.status_code == 200:
+            res_json = response.json()
+            return name, res_json['choices'][0]['message']['content']
+        elif response.status_code == 401:
+            return name, "שגיאה 401: המפתח לא תקין או לא בתוקף. בדוק את ה-API Key ב-OpenRouter."
+        elif response.status_code == 402:
+            return name, "שגיאה 402: חסר קרדיט בחשבון (גם למודלים חינמיים לעיתים נדרש אימות)."
+        else:
+            return name, f"שגיאה {response.status_code}: {response.text}"
+            
     except Exception as e:
-        return name, f"שגיאה בחיבור למודל {name}"
+        return name, f"שגיאה טכנית: {str(e)}"
 
-# תצוגת המודלים הפעילים בתפריט צד
-with st.sidebar:
-    st.header("הבינות המחוברות")
-    for m in MODELS.keys():
-        st.write(f"✅ {m}")
-    st.divider()
-    if st.button("נקה היסטוריית צ'אט"):
-        st.session_state.messages = []
-        st.rerun()
-
-# אתחול זיכרון שיחה
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# תיבת קלט למשתמש
-if prompt := st.chat_input("שאל שאלה לניתוח רב-מודלי..."):
-    # הוספת שאלת המשתמש לתצוגה
+# ממשק משתמש
+if prompt := st.chat_input("שאל שאלה..."):
     with st.chat_message("user"):
-        st.markdown(prompt)
-    
+        st.write(prompt)
+
     with st.chat_message("assistant"):
-        with st.spinner("מנתח נתונים מכל המקורות במקביל..."):
-            # הרצה מקבילית של כל המודלים (Parallel Processing)
+        with st.spinner("פונה לכל המודלים..."):
             results = {}
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 futures = {executor.submit(call_ai, n, i, prompt): n for n, i in MODELS.items()}
-                for future in concurrent.futures.as_completed(futures):
-                    name, text = future.result()
+                for f in concurrent.futures.as_completed(futures):
+                    name, text = f.result()
                     results[name] = text
 
-            # שלב הסינתזה - מבקשים מ-Gemini לאחד את הכל לתשובה אחת עם מקורות
-            synthesis_prompt = f"""
-            קיבלת תשובות מכמה מודלים לשאלה הבאה: "{prompt}"
+            # שלב הסינתזה (איחוד התשובות)
+            st.subheader("📝 תשובה מאוחדת:")
             
-            אלו התשובות הגולמיות:
-            {json.dumps(results, ensure_ascii=False)}
+            # בדיקה אם לפחות מודל אחד עבד
+            valid_results = {k: v for k, v in results.items() if "שגיאה" not in v}
             
-            המשימה שלך:
-            1. כתוב תשובה אחת מאוחדת, מקצועית וקולחת בעברית.
-            2. בסוף כל פסקה או טענה מרכזית, ציין בסוגריים מאיזה מודל המידע הגיע.
-               לדוגמה: (מקור: Perplexity) או (מקור: ChatGPT).
-            3. אם יש סתירות בין המודלים, ציין זאת במפורש.
-            """
-            
-            _, final_answer = call_ai("Synthesizer", "google/gemini-flash-1.5-free", synthesis_prompt)
-            st.markdown(final_answer)
+            if not valid_results:
+                st.error("כל המודלים החזירו שגיאה. בדוק את ה-Logs ב-Streamlit.")
+                for n, r in results.items():
+                    st.warning(f"**{n}:** {r}")
+            else:
+                synth_prompt = f"אחד את התשובות הבאות לתשובה אחת בעברית עם ציון מקורות בסוגריים: {json.dumps(valid_results, ensure_ascii=False)}"
+                _, final_answer = call_ai("Synthesizer", "google/gemini-flash-1.5-free", synth_prompt)
+                st.markdown(final_answer)
 
-            # הצגת המקורות הגולמיים בתוך "אקורדיון" מתקפל
-            with st.expander("ראה את התשובות המקוריות מכל בינה"):
+            with st.expander("פירוט תשובות גולמיות"):
                 for name, content in results.items():
-                    st.write(f"**{name}:**")
-                    st.write(content)
-                    st.divider()
+                    st.write(f"**{name}:** {content}")
